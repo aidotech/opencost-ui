@@ -10,6 +10,7 @@ import {
   DashboardOutlined,
   DescriptionOutlined,
   SettingsOutlined,
+  CloudOutlined,
   LightModeOutlined,
   DarkModeOutlined,
 } from "@mui/icons-material";
@@ -90,6 +91,7 @@ const PAGE_TITLES: Record<string, string> = {
   "/": "Home",
   "/dashboards": "Dashboards",
   "/reports": "Reports",
+  "/cloud-accounts": "Cloud Accounts",
   "/settings": "Settings",
 };
 
@@ -138,6 +140,7 @@ export default function DashboardAppShell({
   const reportsActive =
     pathname === "/reports" || pathname.startsWith("/report/");
   const settingsActive = pathname === "/settings";
+  const cloudAccountsActive = pathname === "/cloud-accounts";
 
   // Derive contextual page title
   const resolvedPageTitle =
@@ -152,6 +155,7 @@ export default function DashboardAppShell({
       { id: "home", label: "Home", type: "page", icon: <HomeOutlined fontSize="small" />, href: "/" },
       { id: "dashboards", label: "Dashboards", type: "page", icon: <DashboardOutlined fontSize="small" />, href: "/dashboards" },
       { id: "reports", label: "Reports", type: "page", icon: <DescriptionOutlined fontSize="small" />, href: "/reports" },
+      { id: "cloud-accounts", label: "Cloud Accounts", type: "page", icon: <CloudOutlined fontSize="small" />, href: "/cloud-accounts" },
       { id: "settings", label: "Settings", type: "page", icon: <SettingsOutlined fontSize="small" />, href: "/settings" },
     ],
     [],
@@ -365,6 +369,13 @@ export default function DashboardAppShell({
               nested
               collapsed={collapsed}
               tutorialPulse={isTutorialActive && navHighlight === "reports"}
+            />
+            <NavLink
+              href="/cloud-accounts"
+              label="Cloud Accounts"
+              icon={<CloudOutlined sx={{ fontSize: 16 }} />}
+              active={cloudAccountsActive}
+              collapsed={collapsed}
             />
 
             <div

@@ -50,6 +50,18 @@ else
     replace_placeholder_in_js "PLACEHOLDER_FOOTER_CONTENT" "OpenCost version: $VERSION ($HEAD)"
 fi
 
+# Display names for the Cloud Accounts page: a JSON object mapping a billing
+# account ID (or a project ID) to the name to show, e.g.
+#   CLOUD_ACCOUNT_NAMES='{"012345-6789AB-CDEF01":"PetCare"}'
+# Written as a file the page fetches, so a name can change without a rebuild.
+# Anything that is not a JSON object is replaced by {} rather than served as is.
+if [ -n "$CLOUD_ACCOUNT_NAMES" ] && printf '%s' "$CLOUD_ACCOUNT_NAMES" | grep -q '^[[:space:]]*{.*}[[:space:]]*$'; then
+    echo "writing cloud-accounts.json"
+    printf '%s' "$CLOUD_ACCOUNT_NAMES" > "$WWW_ROOT/cloud-accounts.json"
+else
+    printf '{}' > "$WWW_ROOT/cloud-accounts.json"
+fi
+
 # Custom aggregation options: JSON object (map string:string), e.g. {"Label: team":"label:team"}
 if [ -n "$CUSTOM_AGGREGATION_OPTIONS" ]; then
     echo "injecting CUSTOM_AGGREGATION_OPTIONS"

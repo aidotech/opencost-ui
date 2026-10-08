@@ -1,0 +1,167 @@
+name: aidotech - build and deploy
+
+# OUR workflow, not upstream's. (OP-4)
+#
+# main -> image in our ECR -> k8_opencost overlays/prod -> ArgoCD -> EKS.
+#
+# This fork adds the Cloud Accounts page, so the cluster cannot run the official
+# interface image. The cost ENGINE is unchanged and runs from the official image;
+# it is not built here.
+#
+# Runs on a CodeBuild-hosted runner. ARM64 ONLY: every EKS node is Graviton.
+# The runs-on label is a contract with Terraform:
+#   bookmyopticket_infra/tfscaffold/etc/env_ap-south-1_dev_codebuild.tfvars
+#     opencost-ui-arm64  (ARM_CONTAINER)
+# A label with no project behind it does NOT fail: the job hangs queued forever.
+#
+# The file name starts with `aidotech-` so it can never collide with a workflow
+# upstream adds, which would turn every sync from upstream into a conflict.
+
+on:
+  push:
+    branches:
+      - main
+    # A sync from upstream that only touches docs or upstream's own CI should not
+    # build and roll the pod.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/**'
+      - '!.github/workflows/aidotech-deploy.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aidotech-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+
+jobs:
+  build:
+    name: build and deploy
+    # Only in our fork. Without this, the workflow would also try to run (and
+    # hang on a missing runner) in anyone else's fork of this fork.
+    if: github.repository == 'aidotech/opencost-ui'
+    runs-on: codebuild-opencost-ui-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          # <upstream version from package.json>-<our commit>: says at a glance
+          # which upstream release the build sits on.
+          VERSION="v$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -1)"
+          [ "$VERSION" != "v" ] || VERSION="v0.0.0"
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "SHORT=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          echo "TAG=${VERSION}-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # No static AWS keys: the CodeBuild service role is already in the
+      # container's credential chain and may push only to opencost/opencost-ui.
+      - name: Authenticate with AWS ECR
+        run: |
+          aws ecr get-login-password --region ${AWS_REGION} \
+            | docker login --username AWS --password-stdin ${{ secrets.IMAGE_REPO_V1 }}
+
+      # Built and RUN before anything reaches ECR. The push below is a cache hit.
+      - name: Build
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg version=${{ steps.tag.outputs.VERSION }} \
+            --build-arg commit=${{ steps.tag.outputs.SHORT }} \
+            --cache-from type=registry,ref=${{ secrets.IMAGE_REPO_V1 }}:buildcache-arm64 \
+            -t opencost-ui:smoke \
+            --load .
+
+      # Proves what the cluster relies on: the container starts as a non-root
+      # user, the probe path answers, the Cloud Accounts page is in the build,
+      # and the account names given at start are served and are valid JSON.
+      # It does not need a cost engine: API_SERVER points at nothing.
+      - name: Smoke test the image
+        run: |
+          docker run -d --name smoke -p 127.0.0.1:9090:9090 \
+            -e API_SERVER=127.0.0.1 -e API_PORT=9003 -e UI_PORT=9090 \
+            -e CLOUD_ACCOUNT_NAMES='{"000000-000000-000000":"Smoke"}' \
+            opencost-ui:smoke
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9090/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { echo "::error::/healthz never answered"; docker logs smoke; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9090/cloud-accounts)" = "200" ] \
+            || { echo "::error::/cloud-accounts did not answer 200"; exit 1; }
+          curl -fsS http://127.0.0.1:9090/cloud-accounts.json | grep -q '"000000-000000-000000":"Smoke"' \
+            || { echo "::error::cloud-accounts.json does not carry the names passed at start"; exit 1; }
+          # The real proof the page shipped: any path answers 200 in a single-page
+          # app, so the 200 above alone would pass without it. (The image's grep
+          # is BusyBox: no --include.)
+          docker exec smoke sh -c 'grep -rlq "cloud-accounts" /var/www' \
+            || { echo "::error::the Cloud Accounts page is not in the build"; exit 1; }
+          [ "$(docker exec smoke id -u)" != "0" ] \
+            || { echo "::error::container runs as root"; exit 1; }
+          docker rm -f smoke
+          echo "smoke test passed"
+
+      - name: Push
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --build-arg version=${{ steps.tag.outputs.VERSION }} \
+            --build-arg commit=${{ steps.tag.outputs.SHORT }} \
+            --cache-from type=registry,ref=${{ secrets.IMAGE_REPO_V1 }}:buildcache-arm64 \
+            --cache-to type=registry,ref=${{ secrets.IMAGE_REPO_V1 }}:buildcache-arm64,mode=max,image-manifest=true,oci-mediatypes=true \
+            -t ${{ secrets.IMAGE_REPO_V1 }}:${{ steps.tag.outputs.TAG }} \
+            --push .
+
+      - name: Verify the image is arm64
+        run: |
+          docker buildx imagetools inspect \
+            ${{ secrets.IMAGE_REPO_V1 }}:${{ steps.tag.outputs.TAG }} > /tmp/manifest.txt
+          cat /tmp/manifest.txt
+          grep -q 'linux/arm64' /tmp/manifest.txt || { echo "::error::arm64 missing"; exit 1; }
+
+      - name: Set up Git configuration
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout the manifest repository
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          repository: aidotech/k8_opencost
+          token: ${{ secrets.MAINFEST_GITHUB_TOKEN }}
+          path: k8s-manifests
+
+      - name: Update the image tag
+        # Passed through env, never interpolated into the script body.
+        env:
+          NEW_TAG: ${{ steps.tag.outputs.TAG }}
+          SRC_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cd k8s-manifests
+          # There is exactly one newTag in this file: the interface image. The
+          # engine is pinned by digest in base/ and is not touched from here.
+          sed -i "s|newTag: .*|newTag: ${NEW_TAG}|" overlays/prod/kustomization.yaml
+          if git diff --quiet; then
+            echo "No changes to commit."
+          else
+            git add -A .
+            git commit \
+              -m "deploy(prod): opencost-ui ${NEW_TAG}" \
+              -m "Source:  ${GITHUB_REPOSITORY}@${SRC_SHA}" \
+              -m "CI run:  ${RUN_URL}"
+            git push origin main
+          fi

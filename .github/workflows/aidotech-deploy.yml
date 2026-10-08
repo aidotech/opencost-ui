@@ -2,7 +2,11 @@ name: aidotech - build and deploy
 
 # OUR workflow, not upstream's. (OP-4)
 #
-# main -> image in our ECR -> k8_opencost overlays/prod -> ArgoCD -> EKS.
+# development -> image -> k8_opencost overlays/dev  -> ArgoCD -> dev-opencost
+# main        -> image -> k8_opencost overlays/prod -> ArgoCD -> opencost
+#
+# Dev first: a change is merged to `development`, checked on dev, and only then
+# merged to `main`. (`main` is also the branch that tracks upstream.)
 #
 # This fork adds the Cloud Accounts page, so the cluster cannot run the official
 # interface image. The cost ENGINE is unchanged and runs from the official image;
@@ -20,6 +24,7 @@ name: aidotech - build and deploy
 on:
   push:
     branches:
+      - development
       - main
     # A sync from upstream that only touches docs or upstream's own CI should not
     # build and roll the pod.
@@ -33,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: aidotech-deploy
+  group: aidotech-deploy-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -60,7 +65,15 @@ jobs:
           [ "$VERSION" != "v" ] || VERSION="v0.0.0"
           echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
           echo "SHORT=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-          echo "TAG=${VERSION}-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          # A dev build says so in its tag, so a dev image can never be mistaken
+          # for (or pinned as) a production one.
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            echo "OVERLAY=prod" >> $GITHUB_OUTPUT
+            echo "TAG=${VERSION}-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          else
+            echo "OVERLAY=dev" >> $GITHUB_OUTPUT
+            echo "TAG=${VERSION}-dev-$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -148,19 +161,21 @@ jobs:
         # Passed through env, never interpolated into the script body.
         env:
           NEW_TAG: ${{ steps.tag.outputs.TAG }}
+          OVERLAY: ${{ steps.tag.outputs.OVERLAY }}
           SRC_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           cd k8s-manifests
-          # There is exactly one newTag in this file: the interface image. The
-          # engine is pinned by digest in base/ and is not touched from here.
-          sed -i "s|newTag: .*|newTag: ${NEW_TAG}|" overlays/prod/kustomization.yaml
+          # ONE overlay, chosen by the branch. Each overlay file has exactly one
+          # newTag: the interface image. The engine is pinned by digest in base/
+          # and is not touched from here.
+          sed -i "s|newTag: .*|newTag: ${NEW_TAG}|" "overlays/${OVERLAY}/kustomization.yaml"
           if git diff --quiet; then
             echo "No changes to commit."
           else
             git add -A .
             git commit \
-              -m "deploy(prod): opencost-ui ${NEW_TAG}" \
+              -m "deploy(${OVERLAY}): opencost-ui ${NEW_TAG}" \
               -m "Source:  ${GITHUB_REPOSITORY}@${SRC_SHA}" \
               -m "CI run:  ${RUN_URL}"
             git push origin main

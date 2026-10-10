@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import DashboardAppShell from "~/components/dashboard-app-shell";
-import { fetchCloudAccounts, type AccountState, type CloudAccount } from "~/services/cloud-accounts";
+import {
+  convert,
+  fetchCloudAccounts,
+  type AccountState,
+  type CloudAccount,
+  type DisplayRates,
+} from "~/services/cloud-accounts";
 
 /**
  * Cloud Accounts: one row per cloud billing account, one total each.
@@ -29,6 +35,23 @@ function money(v: number | null, currency: string): string {
   }
 }
 
+// One amount cell. With a display currency, the converted figure leads and the
+// amount the provider actually charged stays visible under it. An account whose
+// currency has no rate is shown in its own currency only, never guessed.
+function Amount({ value, currency, display }: { value: number | null; currency: string; display: DisplayRates | null }) {
+  if (value === null || !display || currency === display.currency) return <>{money(value, currency)}</>;
+  const converted = convert(value, currency, display.currency, display.perUsd);
+  if (converted === null) return <>{money(value, currency)}</>;
+  return (
+    <>
+      <div>{money(converted, display.currency)}</div>
+      <div className="text-xs font-normal" style={{ color: "var(--cds-text-secondary)" }} data-testid="cloud-account-original">
+        {money(value, currency)}
+      </div>
+    </>
+  );
+}
+
 function when(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -39,6 +62,8 @@ export default function CloudAccountsPage() {
   const [accounts, setAccounts] = useState<CloudAccount[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [totalsError, setTotalsError] = useState<string | null>(null);
+  const [display, setDisplay] = useState<DisplayRates | null>(null);
+  const [displayError, setDisplayError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -47,6 +72,8 @@ export default function CloudAccountsPage() {
       const result = await fetchCloudAccounts();
       setAccounts(result.accounts);
       setTotalsError(result.totalsError);
+      setDisplay(result.display);
+      setDisplayError(result.displayError);
       setError(null);
     } catch (e) {
       // Keep whatever was on screen; say plainly that the refresh failed.
@@ -63,11 +90,39 @@ export default function CloudAccountsPage() {
 
   const withData = (accounts ?? []).filter((a) => a.thisMonth !== null);
   // One total PER CURRENCY. Adding rupees to dollars would give a number that
-  // looks like money and means nothing.
+  // looks like money and means nothing. With a display currency, each amount is
+  // converted first and lands in that one bucket; an account whose currency has
+  // no rate keeps its own bucket rather than being dropped or guessed.
   const totals = new Map<string, number>();
-  for (const a of withData) totals.set(a.currency, (totals.get(a.currency) ?? 0) + (a.thisMonth ?? 0));
-  const totalLines = [...totals.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const convertedFrom = new Set<string>();
+  for (const a of withData) {
+    const v = a.thisMonth ?? 0;
+    const c = display ? convert(v, a.currency, display.currency, display.perUsd) : null;
+    if (display && c !== null) {
+      totals.set(display.currency, (totals.get(display.currency) ?? 0) + c);
+      if (a.currency !== display.currency) convertedFrom.add(a.currency);
+    } else {
+      totals.set(a.currency, (totals.get(a.currency) ?? 0) + v);
+    }
+  }
+  const totalLines = [...totals.entries()].sort(
+    (a, b) => Number(b[0] === display?.currency) - Number(a[0] === display?.currency) || a[0].localeCompare(b[0]),
+  );
+  // "1 USD = ₹88.72" for every currency that was actually converted.
+  const rateLines = display
+    ? [...convertedFrom].sort().map((cur) => {
+        const one = convert(1, cur, display.currency, display.perUsd);
+        return one === null ? null : `1 ${cur} = ${money(one, display.currency)}`;
+      }).filter(Boolean)
+    : [];
   const waiting = (accounts ?? []).filter((a) => a.state === "waiting").length;
+  // Largest first, compared in the display currency when there is one, so a
+  // dollar account is not ranked below a rupee account with a bigger number.
+  const rank = (a: CloudAccount): number => {
+    if (a.thisMonth === null) return -1;
+    return (display ? convert(a.thisMonth, a.currency, display.currency, display.perUsd) : null) ?? a.thisMonth;
+  };
+  const rows = [...(accounts ?? [])].sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
 
   return (
     <DashboardAppShell pageTitle="Cloud Accounts">
@@ -78,8 +133,9 @@ export default function CloudAccountsPage() {
               Cloud Accounts
             </h1>
             <p className="mt-1 text-sm" style={{ color: "var(--cds-text-secondary)" }}>
-              One total per cloud billing account, in that account's own currency. Figures are what was
-              charged, after credits.
+              {display
+                ? `One total per cloud billing account, shown in ${display.currency}. Figures are what was charged, after credits.`
+                : "One total per cloud billing account, in that account's own currency. Figures are what was charged, after credits."}
             </p>
           </div>
           <button
@@ -104,6 +160,12 @@ export default function CloudAccountsPage() {
           </div>
         )}
 
+        {!error && displayError && (
+          <div role="alert" className="mb-4 rounded-md px-4 py-3 text-sm" style={{ background: "#FEF3C7", color: "#92400E" }} data-testid="cloud-accounts-fx-error">
+            Amounts could not be converted, so each account is shown in its own currency: {displayError}
+          </div>
+        )}
+
         <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="rounded-xl p-4 text-white" style={{ background: "linear-gradient(135deg,#0B3954,#0E9488)" }}>
             <div className="text-xs font-semibold uppercase tracking-wide opacity-90">This month, all accounts</div>
@@ -112,11 +174,23 @@ export default function CloudAccountsPage() {
                 ? "…"
                 : totalLines.length === 0
                   ? "—"
-                  : totalLines.map(([cur, sum]) => <div key={cur}>{money(sum, cur)}</div>)}
+                  : totalLines.map(([cur, sum]) => (
+                      <div key={cur}>
+                        {/* ≈ only where a conversion went into the figure */}
+                        {cur === display?.currency && convertedFrom.size > 0 ? "≈ " : ""}
+                        {money(sum, cur)}
+                      </div>
+                    ))}
             </div>
             <div className="mt-1 text-xs opacity-90">
               {withData.length} of {accounts?.length ?? 0} accounts reporting
             </div>
+            {rateLines.length > 0 && (
+              <div className="mt-1 text-xs opacity-90" data-testid="cloud-accounts-rate">
+                {rateLines.join(" · ")}
+                {display?.date ? ` · reference rate of ${display.date}` : ""}
+              </div>
+            )}
           </div>
           <div className="rounded-xl border p-4" style={{ borderColor: "var(--cds-border-subtle)", background: "var(--cds-layer-01)" }}>
             <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--cds-text-secondary)" }}>Accounts connected</div>
@@ -148,7 +222,7 @@ export default function CloudAccountsPage() {
                   No cloud accounts are connected yet.
                 </td></tr>
               )}
-              {(accounts ?? []).map((a) => {
+              {rows.map((a) => {
                 const st = STATE_STYLE[a.state];
                 return (
                   <tr key={a.id} data-testid="cloud-account-row" style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
@@ -171,8 +245,12 @@ export default function CloudAccountsPage() {
                         <div className="mt-1 text-xs" style={{ color: "#991B1B" }}>{a.statusText}</div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>{money(a.thisMonth, a.currency)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>{money(a.lastMonth, a.currency)}</td>
+                    <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>
+                      <Amount value={a.thisMonth} currency={a.currency} display={display} />
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>
+                      <Amount value={a.lastMonth} currency={a.currency} display={display} />
+                    </td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{when(a.lastRun)}</td>
                   </tr>
                 );
@@ -184,6 +262,9 @@ export default function CloudAccountsPage() {
         <p className="mt-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>
           A dash means no data for that period, not a zero. A newly connected account only has costs
           from the day its billing export was switched on.
+          {display && convertedFrom.size > 0
+            ? ` Converted amounts use a daily reference rate and are approximate: the provider's invoice uses its own rate. The amount charged is shown under each converted figure.`
+            : ""}
         </p>
       </div>
     </DashboardAppShell>

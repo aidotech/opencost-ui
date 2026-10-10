@@ -20,7 +20,15 @@ import client from "./api-client";
  * 🔑 The cost engine has no notion of currency: it passes on the provider's
  * numbers as they are. An account billed in rupees reports rupee amounts. So the
  * currency is configuration, it defaults to USD, and amounts in different
- * currencies are NEVER added together.
+ * currencies are NEVER added together as they are.
+ *
+ * Display currency (optional). When cloud-display.json names one, e.g.
+ *   { "currency": "INR" }
+ * every account is ALSO shown converted into it, and the converted amounts are
+ * what gets added up. The rates come from fx/latest.json, which nginx fetches
+ * from a public reference-rate service and caches; the browser never calls a
+ * third party. A converted figure is an approximation: the provider's invoice
+ * uses the provider's own rate on its own date.
  */
 
 export const DEFAULT_CURRENCY = "USD";
@@ -143,19 +151,91 @@ async function accountLabels(): Promise<Record<string, AccountLabel>> {
   }
 }
 
+/** Reference rates, all quoted against one US dollar. */
+export interface DisplayRates {
+  /** The currency every account is converted into, e.g. INR. */
+  currency: string;
+  /** The day the rates are for, as the rate service reports it (YYYY-MM-DD). */
+  date: string;
+  /** Units of each currency per 1 USD. Always contains USD: 1. */
+  perUsd: Record<string, number>;
+}
+
+/**
+ * Convert an amount between two currencies through the dollar.
+ * null = one of the two currencies has no rate, so the amount cannot be
+ * converted. Callers must then keep it in its own currency, never guess.
+ */
+export function convert(amount: number, from: string, to: string, perUsd: Record<string, number>): number | null {
+  if (from === to) return amount;
+  const f = perUsd[from];
+  const t = perUsd[to];
+  if (!(f > 0) || !(t > 0)) return null;
+  return (amount / f) * t;
+}
+
+async function displayCurrency(): Promise<string | null> {
+  try {
+    const resp = await fetch(`${import.meta.env.BASE_URL}cloud-display.json`, { cache: "no-store" });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const c = typeof data?.currency === "string" ? data.currency.trim().toUpperCase() : "";
+    return /^[A-Z]{3}$/.test(c) ? c : null;
+  } catch {
+    return null;
+  }
+}
+
+async function ratesPerUsd(): Promise<{ date: string; perUsd: Record<string, number> }> {
+  const resp = await fetch(`${import.meta.env.BASE_URL}fx/latest.json`);
+  if (!resp.ok) throw new Error(`exchange rates answered ${resp.status}`);
+  const data = await resp.json();
+  if (data?.base !== "USD" || !data.rates || typeof data.rates !== "object") {
+    throw new Error("exchange rates came back in an unexpected shape");
+  }
+  const perUsd: Record<string, number> = { USD: 1 };
+  for (const [code, rate] of Object.entries(data.rates)) {
+    // Anything that is not a positive number is dropped, so it can never be
+    // multiplied into a total.
+    if (/^[A-Z]{3}$/.test(code) && typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+      perUsd[code] = rate;
+    }
+  }
+  return { date: typeof data.date === "string" ? data.date : "", perUsd };
+}
+
 export interface CloudAccountsResult {
   accounts: CloudAccount[];
   /** Set when the totals could not be fetched at all (as opposed to being empty). */
   totalsError: string | null;
+  /** null = no display currency is configured, or its rates could not be had. */
+  display: DisplayRates | null;
+  /** Set when a display currency IS configured but conversion is not possible. */
+  displayError: string | null;
 }
 
 export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
-  const [statusResp, names, month, lastMonth] = await Promise.all([
+  const [statusResp, names, month, lastMonth, displayCode] = await Promise.all([
     client.get("/cloudCost/status"),
     accountLabels(),
     totals("month").catch((e) => e as Error),
     totals("lastmonth").catch((e) => e as Error),
+    displayCurrency(),
   ]);
+
+  // Rates are only fetched when a display currency is asked for. A failure
+  // here must never hide the accounts: the page falls back to own currencies.
+  let display: DisplayRates | null = null;
+  let displayError: string | null = null;
+  if (displayCode) {
+    try {
+      const r = await ratesPerUsd();
+      if (r.perUsd[displayCode] > 0) display = { currency: displayCode, date: r.date, perUsd: r.perUsd };
+      else displayError = `no exchange rate is published for ${displayCode}`;
+    } catch (e) {
+      displayError = e instanceof Error ? e.message : "exchange rates could not be fetched";
+    }
+  }
 
   const monthMap = month instanceof Map ? month : new Map<string, number>();
   const lastMap = lastMonth instanceof Map ? lastMonth : new Map<string, number>();
@@ -203,5 +283,5 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
   const accounts = [...byId.values()].sort(
     (a, b) => (b.thisMonth ?? -1) - (a.thisMonth ?? -1) || a.name.localeCompare(b.name),
   );
-  return { accounts, totalsError };
+  return { accounts, totalsError, display, displayError };
 }

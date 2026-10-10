@@ -52,6 +52,12 @@ function Amount({ value, currency, display }: { value: number | null; currency: 
   );
 }
 
+// The switch's third choice: no conversion, each account in its own currency.
+const ORIGINAL = "ORIGINAL";
+// Where the browser remembers the choice. A convenience only: the page must
+// work the same when storage is unavailable (private window, blocked data).
+const CHOICE_KEY = "cloudAccounts.displayCurrency";
+
 function when(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -62,7 +68,10 @@ export default function CloudAccountsPage() {
   const [accounts, setAccounts] = useState<CloudAccount[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [totalsError, setTotalsError] = useState<string | null>(null);
-  const [display, setDisplay] = useState<DisplayRates | null>(null);
+  // The currency set in the deployment, with the rates. null = none set.
+  const [configured, setConfigured] = useState<DisplayRates | null>(null);
+  // What the viewer picked on the switch. null = nothing picked: use the default.
+  const [choice, setChoice] = useState<string | null>(null);
   const [displayError, setDisplayError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -72,7 +81,7 @@ export default function CloudAccountsPage() {
       const result = await fetchCloudAccounts();
       setAccounts(result.accounts);
       setTotalsError(result.totalsError);
-      setDisplay(result.display);
+      setConfigured(result.display);
       setDisplayError(result.displayError);
       setError(null);
     } catch (e) {
@@ -87,6 +96,32 @@ export default function CloudAccountsPage() {
     document.title = "Cloud Accounts | OpenCost";
     void load();
   }, [load]);
+
+  useEffect(() => {
+    try {
+      setChoice(window.localStorage.getItem(CHOICE_KEY));
+    } catch {
+      // No storage: the default applies.
+    }
+  }, []);
+
+  const pick = (value: string) => {
+    setChoice(value);
+    try {
+      window.localStorage.setItem(CHOICE_KEY, value);
+    } catch {
+      // The choice still holds for this visit.
+    }
+  };
+
+  // The switch offers the configured currency, the dollar, and "Original". It
+  // only exists when rates are available: without them nothing can be converted.
+  const options = configured ? [...new Set([configured.currency, "USD"])] : [];
+  // A remembered choice that is no longer on offer falls back to the default.
+  const picked =
+    choice !== null && (choice === ORIGINAL || options.includes(choice)) ? choice : (configured?.currency ?? ORIGINAL);
+  const display: DisplayRates | null =
+    configured && picked !== ORIGINAL ? { ...configured, currency: picked } : null;
 
   const withData = (accounts ?? []).filter((a) => a.thisMonth !== null);
   // One total PER CURRENCY. Adding rupees to dollars would give a number that
@@ -112,7 +147,10 @@ export default function CloudAccountsPage() {
   const rateLines = display
     ? [...convertedFrom].sort().map((cur) => {
         const one = convert(1, cur, display.currency, display.perUsd);
-        return one === null ? null : `1 ${cur} = ${money(one, display.currency)}`;
+        if (one === null) return null;
+        // Quote the rate the way round that reads as a number above one:
+        // "1 USD = ₹96.73", never "1 INR = $0.01".
+        return one >= 1 ? `1 ${cur} = ${money(one, display.currency)}` : `1 ${display.currency} = ${money(1 / one, cur)}`;
       }).filter(Boolean)
     : [];
   const waiting = (accounts ?? []).filter((a) => a.state === "waiting").length;
@@ -120,7 +158,10 @@ export default function CloudAccountsPage() {
   // dollar account is not ranked below a rupee account with a bigger number.
   const rank = (a: CloudAccount): number => {
     if (a.thisMonth === null) return -1;
-    return (display ? convert(a.thisMonth, a.currency, display.currency, display.perUsd) : null) ?? a.thisMonth;
+    if (!display) return a.thisMonth;
+    // An amount that cannot be converted cannot be compared either: it goes
+    // below the converted ones (and above accounts with no data).
+    return convert(a.thisMonth, a.currency, display.currency, display.perUsd) ?? -0.5;
   };
   const rows = [...(accounts ?? [])].sort((a, b) => rank(b) - rank(a) || a.name.localeCompare(b.name));
 
@@ -138,6 +179,29 @@ export default function CloudAccountsPage() {
                 : "One total per cloud billing account, in that account's own currency. Figures are what was charged, after credits."}
             </p>
           </div>
+          {options.length > 0 && (
+            <div className="ml-auto flex items-center gap-2 text-sm" data-testid="cloud-accounts-currency-switch">
+              <span style={{ color: "var(--cds-text-secondary)" }}>Show in</span>
+              <div role="group" aria-label="Display currency" className="inline-flex overflow-hidden rounded-md border" style={{ borderColor: "var(--cds-border-subtle)" }}>
+                {[...options, ORIGINAL].map((o) => {
+                  const on = o === picked;
+                  return (
+                    <button
+                      key={o}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => pick(o)}
+                      title={o === ORIGINAL ? "Each account in the currency it is billed in, with no conversion" : `Convert every account to ${o}`}
+                      className="px-3 py-1.5 font-medium"
+                      style={on ? { background: "#0B3954", color: "#fff" } : { background: "var(--cds-layer-01)", color: "var(--cds-text-primary)" }}
+                    >
+                      {o === ORIGINAL ? "Original" : o}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => void load()}

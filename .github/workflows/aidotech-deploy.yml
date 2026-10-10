@@ -92,6 +92,7 @@ jobs:
           docker run -d --name smoke -p 127.0.0.1:9090:9090 \
             -e API_SERVER=127.0.0.1 -e API_PORT=9003 -e UI_PORT=9090 \
             -e CLOUD_ACCOUNT_NAMES='{"000000-000000-000000":"Smoke"}' \
+            -e CLOUD_DISPLAY_CURRENCY=INR \
             opencost-ui:smoke
           ok=0
           for i in $(seq 1 30); do
@@ -103,6 +104,14 @@ jobs:
             || { echo "::error::/cloud-accounts did not answer 200"; exit 1; }
           curl -fsS http://127.0.0.1:9090/cloud-accounts.json | grep -q '"000000-000000-000000":"Smoke"' \
             || { echo "::error::cloud-accounts.json does not carry the names passed at start"; exit 1; }
+          curl -fsS http://127.0.0.1:9090/cloud-display.json | grep -q '"currency":"INR"' \
+            || { echo "::error::cloud-display.json does not carry the display currency passed at start"; exit 1; }
+          # The exchange-rate relay must exist as a real location and be read-only.
+          # A POST answers 403 only if the location is there: without it the
+          # single-page app would answer for the path instead. This does not
+          # call the rate service (CI must not depend on a third party being up).
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9090/fx/latest.json)" = "403" ] \
+            || { echo "::error::/fx/latest.json is missing or accepts writes"; exit 1; }
           # The real proof the page shipped: any path answers 200 in a single-page
           # app, so the 200 above alone would pass without it. (The image's grep
           # is BusyBox: no --include.)

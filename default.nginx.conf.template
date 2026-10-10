@@ -32,6 +32,10 @@ gzip_types
     text/x-component
     text/x-cross-domain-policy;
 
+# Cache for the exchange-rate relay below (location = /fx/latest.json). In /tmp
+# because that is where this image keeps everything it writes at run time.
+proxy_cache_path /tmp/fx-cache levels=1 keys_zone=fx:1m max_size=1m inactive=30d use_temp_path=off;
+
 upstream model {
     # Update to the cost model endpoint
     # Example: host.docker.internal:9003;
@@ -71,6 +75,63 @@ server {
         access_log /dev/null;
         return 200 'OK';
     }
+    # ── Exchange rates for the Cloud Accounts page ──────────────────────────
+    # The page shows every account in one display currency. The rates are
+    # fetched HERE, by the server, so the browser never talks to a third party
+    # and the page works behind a strict login.
+    #
+    # NOT AN OPEN PROXY: one exact path mapped to one fixed URL. Nothing from
+    # the request (path, query, headers, body) reaches the upstream.
+    #
+    # The upstream host is in a variable ON PURPOSE. With a literal hostname,
+    # nginx resolves it once at start-up and REFUSES TO START if that lookup
+    # fails, so a third party's DNS problem would take the whole interface
+    # down. A variable makes nginx resolve at request time: a dead rate
+    # service costs one failed request on this path and nothing else.
+    #
+    # The rates are daily reference rates, so one upstream request every 6
+    # hours is plenty. If the upstream is down the last good answer is served
+    # (for up to 30 days) rather than an error. The cache is lost when the
+    # container restarts; the page then falls back to each account's own
+    # currency until the upstream answers again.
+    location = /fx/latest.json {
+        # Reading only. Anything else would skip the cache and go upstream.
+        limit_except GET { deny all; }
+
+        resolver ${FX_RESOLVERS} valid=300s ipv6=off;
+        resolver_timeout 3s;
+        set $fx_upstream "api.frankfurter.dev";
+        proxy_pass https://$fx_upstream/v1/latest?base=USD;
+
+        proxy_ssl_server_name on;
+        proxy_ssl_name api.frankfurter.dev;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_http_version 1.1;
+        proxy_set_header Host api.frankfurter.dev;
+        proxy_set_header Connection "";
+        # Send the upstream nothing about our visitors or our login.
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+        proxy_set_header Referer "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_connect_timeout 4s;
+        proxy_read_timeout 6s;
+
+        proxy_cache fx;
+        proxy_cache_key fx-latest-usd;
+        proxy_cache_valid 200 6h;
+        proxy_cache_valid any 1m;
+        proxy_cache_lock on;
+        proxy_cache_use_stale error timeout updating http_429 http_500 http_502 http_503 http_504;
+        proxy_cache_background_update on;
+        proxy_ignore_headers Cache-Control Expires Set-Cookie Vary;
+        proxy_hide_header Set-Cookie;
+    }
+
     location ${BASE_URL}/ {
         proxy_connect_timeout       ${PROXY_CONNECT_TIMEOUT};
         proxy_send_timeout          ${PROXY_SEND_TIMEOUT};

@@ -64,6 +64,24 @@ else
     printf '{}' > "$WWW_ROOT/cloud-accounts.json"
 fi
 
+# Display currency for the Cloud Accounts page, e.g. CLOUD_DISPLAY_CURRENCY=INR.
+# When set, every account is also shown converted into it. Three capital
+# letters or nothing: anything else is ignored rather than served.
+if printf '%s' "$CLOUD_DISPLAY_CURRENCY" | grep -q '^[A-Z][A-Z][A-Z]$'; then
+    echo "writing cloud-display.json ($CLOUD_DISPLAY_CURRENCY)"
+    printf '{"currency":"%s"}' "$CLOUD_DISPLAY_CURRENCY" > "$WWW_ROOT/cloud-display.json"
+else
+    printf '{}' > "$WWW_ROOT/cloud-display.json"
+fi
+
+# The DNS servers this container was given, for the exchange-rate relay in the
+# nginx config: it resolves its upstream at request time and nginx has to be
+# told which resolver to use. Read from resolv.conf so the same image works in
+# Docker and in a cluster. IPv6 addresses need brackets in nginx.
+FX_RESOLVERS=$(awk '/^nameserver/ { if ($2 ~ /:/) printf "[%s] ", $2; else printf "%s ", $2 }' /etc/resolv.conf 2>/dev/null)
+[ -n "$FX_RESOLVERS" ] || FX_RESOLVERS="127.0.0.1"
+export FX_RESOLVERS
+
 # Custom aggregation options: JSON object (map string:string), e.g. {"Label: team":"label:team"}
 if [ -n "$CUSTOM_AGGREGATION_OPTIONS" ]; then
     echo "injecting CUSTOM_AGGREGATION_OPTIONS"
@@ -72,7 +90,7 @@ if [ -n "$CUSTOM_AGGREGATION_OPTIONS" ]; then
 fi
 
 if [ ! -e /etc/nginx/conf.d/default.nginx.conf ]; then
-    envsubst '$API_PORT $API_SERVER $UI_PORT $NGINX_ROOT $UI_PATH $BASE_URL $PROXY_CONNECT_TIMEOUT $PROXY_SEND_TIMEOUT $PROXY_READ_TIMEOUT' \
+    envsubst '$API_PORT $API_SERVER $UI_PORT $NGINX_ROOT $UI_PATH $BASE_URL $PROXY_CONNECT_TIMEOUT $PROXY_SEND_TIMEOUT $PROXY_READ_TIMEOUT $FX_RESOLVERS' \
         < /etc/nginx/conf.d/default.nginx.conf.template \
         > /etc/nginx/conf.d/default.nginx.conf
 fi

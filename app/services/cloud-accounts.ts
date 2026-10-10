@@ -9,9 +9,21 @@ import client from "./api-client";
  * Three sources, fetched together:
  *  - /cloudCost/status       which accounts are connected, and whether data is arriving
  *  - /cloudCost/view/table   the totals, grouped by billing account (invoiceEntityID)
- *  - cloud-accounts.json     display names, written at container start from the
- *                            CLOUD_ACCOUNT_NAMES environment variable
+ *  - cloud-accounts.json     display names and currencies, written at container
+ *                            start from the CLOUD_ACCOUNT_NAMES environment variable
+ *
+ * cloud-accounts.json maps an account ID to either a name, or a name and the
+ * currency that account is billed in:
+ *   { "012345-6789AB-CDEF01": "Shop",
+ *     "123456789012": { "name": "Main AWS", "currency": "USD" } }
+ *
+ * 🔑 The cost engine has no notion of currency: it passes on the provider's
+ * numbers as they are. An account billed in rupees reports rupee amounts. So the
+ * currency is configuration, it defaults to USD, and amounts in different
+ * currencies are NEVER added together.
  */
+
+export const DEFAULT_CURRENCY = "USD";
 
 export type AccountState = "ok" | "waiting" | "failed" | "unknown";
 
@@ -21,6 +33,8 @@ export interface CloudAccount {
   /** The name to show: from cloud-accounts.json, else the project ID, else the ID */
   name: string;
   provider: string;
+  /** ISO 4217 code this account is billed in. Configuration, not detected. */
+  currency: string;
   projectId: string | null;
   state: AccountState;
   /** The provider-side status text, e.g. "Connection Successful" or "Data Missing" */
@@ -38,7 +52,7 @@ interface StatusRow {
   connectionStatus: string;
   lastRun?: string;
   nextRun?: string;
-  config?: { projectID?: string; table?: string };
+  config?: { projectID?: string; table?: string; account?: string };
 }
 
 interface TableRow {
@@ -55,6 +69,17 @@ interface TableRow {
 export function billingIdFromGcpTable(table: string | undefined): string | null {
   const m = /_v1_([0-9A-Za-z]{6})_([0-9A-Za-z]{6})_([0-9A-Za-z]{6})$/.exec(table ?? "");
   return m ? `${m[1]}-${m[2]}-${m[3]}`.toUpperCase() : null;
+}
+
+/**
+ * Which billing account a connected integration belongs to. This is the ID the
+ * cost rows are grouped by (invoiceEntityID), so the two can be joined.
+ *   GCP  the billing account, recovered from the export table's name
+ *   AWS  the account the report belongs to (its own payer unless it sits under
+ *        another organisation's management account)
+ */
+function accountIdOf(s: StatusRow): string {
+  return billingIdFromGcpTable(s.config?.table) ?? s.config?.account ?? s.key;
 }
 
 function stateOf(status: string): AccountState {
@@ -84,7 +109,12 @@ async function totals(window: string): Promise<Map<string, number>> {
   return out;
 }
 
-async function displayNames(): Promise<Record<string, string>> {
+interface AccountLabel {
+  name?: string;
+  currency?: string;
+}
+
+async function accountLabels(): Promise<Record<string, AccountLabel>> {
   try {
     // Served by nginx next to the app, NOT through the API proxy. no-store, so
     // a renamed account shows without a hard refresh.
@@ -92,11 +122,22 @@ async function displayNames(): Promise<Record<string, string>> {
     if (!resp.ok) return {};
     const data = await resp.json();
     if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-    const names: Record<string, string> = {};
+    const labels: Record<string, AccountLabel> = {};
     for (const [k, v] of Object.entries(data)) {
-      if (typeof v === "string" && v.trim()) names[k.toUpperCase()] = v.trim();
+      if (typeof v === "string" && v.trim()) {
+        labels[k.toUpperCase()] = { name: v.trim() };
+      } else if (v && typeof v === "object" && !Array.isArray(v)) {
+        const o = v as Record<string, unknown>;
+        const name = typeof o.name === "string" && o.name.trim() ? o.name.trim() : undefined;
+        // Three letters only; anything else is ignored rather than shown.
+        const currency =
+          typeof o.currency === "string" && /^[A-Za-z]{3}$/.test(o.currency.trim())
+            ? o.currency.trim().toUpperCase()
+            : undefined;
+        if (name || currency) labels[k.toUpperCase()] = { name, currency };
+      }
     }
-    return names;
+    return labels;
   } catch {
     return {};
   }
@@ -111,7 +152,7 @@ export interface CloudAccountsResult {
 export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
   const [statusResp, names, month, lastMonth] = await Promise.all([
     client.get("/cloudCost/status"),
-    displayNames(),
+    accountLabels(),
     totals("month").catch((e) => e as Error),
     totals("lastmonth").catch((e) => e as Error),
   ]);
@@ -126,10 +167,12 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
   // 1. Every connected account, whether or not it has data yet.
   for (const s of (statusResp.data?.data ?? []) as StatusRow[]) {
     const projectId = s.config?.projectID ?? null;
-    const id = billingIdFromGcpTable(s.config?.table) ?? s.key;
+    const id = accountIdOf(s);
+    const label = names[id.toUpperCase()] ?? (projectId ? names[projectId.toUpperCase()] : undefined) ?? {};
     byId.set(id.toUpperCase(), {
       id,
-      name: names[id.toUpperCase()] ?? (projectId ? names[projectId.toUpperCase()] : undefined) ?? projectId ?? id,
+      name: label.name ?? projectId ?? id,
+      currency: label.currency ?? DEFAULT_CURRENCY,
       provider: s.provider || "Cloud",
       projectId,
       state: stateOf(s.connectionStatus),
@@ -147,7 +190,8 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
       let acct = byId.get(id);
       if (!acct) {
         acct = {
-          id, name: names[id] ?? id, provider: "Cloud", projectId: null, state: "ok",
+          id, name: names[id]?.name ?? id, currency: names[id]?.currency ?? DEFAULT_CURRENCY,
+          provider: "Cloud", projectId: null, state: "ok",
           statusText: "Has cost data", lastRun: null, nextRun: null, thisMonth: null, lastMonth: null,
         };
         byId.set(id, acct);

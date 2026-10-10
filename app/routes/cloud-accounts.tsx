@@ -17,11 +17,16 @@ const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string 
   unknown: { label: "Unknown", bg: "#E5E7EB", fg: "#374151" },
 };
 
-// GCP reports in the billing account's currency; these accounts bill in USD.
-// "—" means no data, which is different from a real total of $0.00.
-function money(v: number | null): string {
+// Each account's amounts are in that account's own billing currency.
+// "—" means no data, which is different from a real total of 0.00.
+function money(v: number | null, currency: string): string {
   if (v === null) return "—";
-  return v.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
+  try {
+    return v.toLocaleString("en-US", { style: "currency", currency, minimumFractionDigits: 2 });
+  } catch {
+    // An unknown currency code must not break the page.
+    return `${v.toFixed(2)} ${currency}`;
+  }
 }
 
 function when(iso: string | null): string {
@@ -57,7 +62,11 @@ export default function CloudAccountsPage() {
   }, [load]);
 
   const withData = (accounts ?? []).filter((a) => a.thisMonth !== null);
-  const total = withData.reduce((sum, a) => sum + (a.thisMonth ?? 0), 0);
+  // One total PER CURRENCY. Adding rupees to dollars would give a number that
+  // looks like money and means nothing.
+  const totals = new Map<string, number>();
+  for (const a of withData) totals.set(a.currency, (totals.get(a.currency) ?? 0) + (a.thisMonth ?? 0));
+  const totalLines = [...totals.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   const waiting = (accounts ?? []).filter((a) => a.state === "waiting").length;
 
   return (
@@ -69,7 +78,8 @@ export default function CloudAccountsPage() {
               Cloud Accounts
             </h1>
             <p className="mt-1 text-sm" style={{ color: "var(--cds-text-secondary)" }}>
-              One total per cloud billing account. Figures are what was charged, after credits.
+              One total per cloud billing account, in that account's own currency. Figures are what was
+              charged, after credits.
             </p>
           </div>
           <button
@@ -98,7 +108,11 @@ export default function CloudAccountsPage() {
           <div className="rounded-xl p-4 text-white" style={{ background: "linear-gradient(135deg,#0B3954,#0E9488)" }}>
             <div className="text-xs font-semibold uppercase tracking-wide opacity-90">This month, all accounts</div>
             <div className="mt-1 text-3xl font-bold" data-testid="cloud-accounts-total">
-              {accounts === null ? "…" : withData.length ? money(total) : "—"}
+              {accounts === null
+                ? "…"
+                : totalLines.length === 0
+                  ? "—"
+                  : totalLines.map(([cur, sum]) => <div key={cur}>{money(sum, cur)}</div>)}
             </div>
             <div className="mt-1 text-xs opacity-90">
               {withData.length} of {accounts?.length ?? 0} accounts reporting
@@ -157,8 +171,8 @@ export default function CloudAccountsPage() {
                         <div className="mt-1 text-xs" style={{ color: "#991B1B" }}>{a.statusText}</div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>{money(a.thisMonth)}</td>
-                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>{money(a.lastMonth)}</td>
+                    <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>{money(a.thisMonth, a.currency)}</td>
+                    <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>{money(a.lastMonth, a.currency)}</td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{when(a.lastRun)}</td>
                   </tr>
                 );

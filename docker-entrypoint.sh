@@ -53,6 +53,8 @@ fi
 # Display names for the Cloud Accounts page: a JSON object mapping a billing
 # account ID (or a project ID) to the name to show, e.g.
 #   CLOUD_ACCOUNT_NAMES='{"012345-6789AB-CDEF01":"PetCare"}'
+# A value may also be an object giving the billing currency (default USD):
+#   {"123456789012":{"name":"Main AWS","currency":"USD"}}
 # Written as a file the page fetches, so a name can change without a rebuild.
 # Anything that is not a JSON object is replaced by {} rather than served as is.
 if [ -n "$CLOUD_ACCOUNT_NAMES" ] && printf '%s' "$CLOUD_ACCOUNT_NAMES" | grep -q '^[[:space:]]*{.*}[[:space:]]*$'; then

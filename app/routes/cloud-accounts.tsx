@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import DashboardAppShell from "~/components/dashboard-app-shell";
+import FixedCostsEditor from "~/components/fixed-costs-editor";
 import {
   convert,
   fetchCloudAccounts,
+  saveFixedCosts,
+  type FixedCost,
   type AccountState,
   type CloudAccount,
   type DisplayRates,
@@ -75,6 +78,9 @@ export default function CloudAccountsPage() {
   // What the viewer picked on the switch. null = nothing picked: use the default.
   const [choice, setChoice] = useState<string | null>(null);
   const [displayError, setDisplayError] = useState<string | null>(null);
+  // The fixed costs saved from the page. null = they cannot be edited here.
+  const [savedFixed, setSavedFixed] = useState<FixedCost[] | null>(null);
+  const [savedFixedError, setSavedFixedError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -85,6 +91,8 @@ export default function CloudAccountsPage() {
       setTotalsError(result.totalsError);
       setConfigured(result.display);
       setDisplayError(result.displayError);
+      setSavedFixed(result.savedFixed);
+      setSavedFixedError(result.savedFixedError);
       setError(null);
     } catch (e) {
       // Keep whatever was on screen; say plainly that the refresh failed.
@@ -337,6 +345,21 @@ export default function CloudAccountsPage() {
             </tbody>
           </table>
         </div>
+
+        {savedFixedError && (
+          <div role="alert" className="mt-4 rounded-md px-4 py-3 text-sm" style={{ background: "#FEF3C7", color: "#92400E" }} data-testid="fixed-costs-unavailable">
+            Fixed costs saved from this page are not shown and cannot be edited right now: {savedFixedError}
+          </div>
+        )}
+        {savedFixed !== null && (
+          <FixedCostsEditor
+            items={savedFixed}
+            onSave={async (items) => {
+              await saveFixedCosts(items);
+              await load();
+            }}
+          />
+        )}
 
         <p className="mt-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>
           {fixedCount > 0 ? "A fixed cost is a monthly amount entered in configuration, counted in full for each month it applies to. " : ""}

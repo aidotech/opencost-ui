@@ -93,6 +93,7 @@ jobs:
             -e API_SERVER=127.0.0.1 -e API_PORT=9003 -e UI_PORT=9090 \
             -e CLOUD_ACCOUNT_NAMES='{"000000-000000-000000":"Smoke","_fixed":[{"name":"Smoke plan","amount":1,"currency":"USD"}]}' \
             -e CLOUD_DISPLAY_CURRENCY=INR \
+            -e FIXED_COSTS_DIR=/tmp/fixed-costs \
             opencost-ui:smoke
           ok=0
           for i in $(seq 1 30); do
@@ -108,6 +109,25 @@ jobs:
             || { echo "::error::cloud-accounts.json does not carry the fixed costs passed at start"; exit 1; }
           curl -fsS http://127.0.0.1:9090/cloud-display.json | grep -q '"currency":"INR"' \
             || { echo "::error::cloud-display.json does not carry the display currency passed at start"; exit 1; }
+          # Fixed costs edited from the page: the flag is served, a save is kept
+          # and read back, and nothing but GET and PUT is accepted.
+          curl -fsS http://127.0.0.1:9090/cloud-display.json | grep -q '"fixedCostsEditable":true' \
+            || { echo "::error::cloud-display.json does not say fixed costs can be edited"; exit 1; }
+          [ "$(curl -fsS http://127.0.0.1:9090/store/fixed-costs.json)" = '{"fixed":[]}' ] \
+            || { echo "::error::the fixed costs file does not start as an empty list"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/json' \
+            -d '{"fixed":[{"name":"Smoke saved","provider":"Smoke","amount":2,"currency":"USD","from":null,"to":null}]}' \
+            http://127.0.0.1:9090/store/fixed-costs.json)
+          [ "$code" = "204" ] || { echo "::error::saving fixed costs answered $code, expected 204"; exit 1; }
+          curl -fsS http://127.0.0.1:9090/store/fixed-costs.json | grep -q '"name":"Smoke saved"' \
+            || { echo "::error::the saved fixed costs were not read back"; exit 1; }
+          for m in POST DELETE MKCOL; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X $m http://127.0.0.1:9090/store/fixed-costs.json)
+            [ "$code" = "403" ] || { echo "::error::$m on the fixed costs file answered $code, expected 403"; exit 1; }
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -d 'x' http://127.0.0.1:9090/store/other.json)
+          [ "$code" != "201" ] && [ "$code" != "204" ] || { echo "::error::a second file could be written ($code)"; exit 1; }
+
           # The exchange-rate relay must exist as a real location and be read-only.
           # A POST answers 403 only if the location is there: without it the
           # single-page app would answer for the path instead. This does not

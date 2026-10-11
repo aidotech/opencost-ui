@@ -132,6 +132,12 @@ server {
         proxy_hide_header Set-Cookie;
     }
 
+    # ── Fixed costs saved from the Cloud Accounts page ──────────────────────
+    # Empty unless FIXED_COSTS_DIR is set and writable. When it is, this is ONE
+    # exact path that can be read and replaced (GET, PUT), backed by one file.
+    # Written by docker-entrypoint.sh, which explains the limits.
+    ${FIXED_COSTS_LOCATION}
+
     location ${BASE_URL}/ {
         proxy_connect_timeout       ${PROXY_CONNECT_TIMEOUT};
         proxy_send_timeout          ${PROXY_SEND_TIMEOUT};

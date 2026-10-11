@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import DashboardAppShell from "~/components/dashboard-app-shell";
+import FixedCostsEditor from "~/components/fixed-costs-editor";
 import {
   convert,
   fetchCloudAccounts,
+  saveFixedCosts,
+  type FixedCost,
   type AccountState,
   type CloudAccount,
   type DisplayRates,
@@ -24,6 +27,9 @@ const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string 
   // Not fetched from anywhere: an amount written in configuration.
   fixed: { label: "Fixed cost", bg: "#E0E7FF", fg: "#3730A3" },
 };
+
+// A fixed cost marked as a free plan: listed, costs nothing.
+const FREE_STYLE = { label: "Free plan", bg: "#DCFCE7", fg: "#166534" };
 
 // Each account's amounts are in that account's own billing currency.
 // "—" means no data, which is different from a real total of 0.00.
@@ -75,6 +81,9 @@ export default function CloudAccountsPage() {
   // What the viewer picked on the switch. null = nothing picked: use the default.
   const [choice, setChoice] = useState<string | null>(null);
   const [displayError, setDisplayError] = useState<string | null>(null);
+  // The fixed costs saved from the page. null = they cannot be edited here.
+  const [savedFixed, setSavedFixed] = useState<FixedCost[] | null>(null);
+  const [savedFixedError, setSavedFixedError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = useCallback(async () => {
@@ -85,6 +94,8 @@ export default function CloudAccountsPage() {
       setTotalsError(result.totalsError);
       setConfigured(result.display);
       setDisplayError(result.displayError);
+      setSavedFixed(result.savedFixed);
+      setSavedFixedError(result.savedFixedError);
       setError(null);
     } catch (e) {
       // Keep whatever was on screen; say plainly that the refresh failed.
@@ -133,6 +144,8 @@ export default function CloudAccountsPage() {
   const totals = new Map<string, number>();
   const convertedFrom = new Set<string>();
   for (const a of withData) {
+    // A free plan adds nothing, and must not open a 0.00 line in its currency.
+    if (a.free) continue;
     const v = a.thisMonth ?? 0;
     const c = display ? convert(v, a.currency, display.currency, display.perUsd) : null;
     if (display && c !== null) {
@@ -300,14 +313,14 @@ export default function CloudAccountsPage() {
                 </td></tr>
               )}
               {rows.map((a) => {
-                const st = STATE_STYLE[a.state];
+                const st = a.free ? FREE_STYLE : STATE_STYLE[a.state];
                 return (
                   <tr key={a.id} data-testid="cloud-account-row" style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
                     <td className="px-4 py-3">
                       <div className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{a.name}</div>
                       <div className="text-xs" style={{ color: "var(--cds-text-secondary)" }}>
                         {a.state === "fixed"
-                          ? `${a.provider} · fixed monthly amount, not fetched`
+                          ? `${a.provider} · ${a.free ? "free plan" : "fixed monthly amount"}, not fetched`
                           : `${a.provider}${a.projectId ? ` · ${a.projectId}` : ""} · ${a.id}`}
                       </div>
                     </td>
@@ -325,10 +338,10 @@ export default function CloudAccountsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>
-                      <Amount value={a.thisMonth} currency={a.currency} display={display} />
+                      {a.free && a.thisMonth !== null ? "Free" : <Amount value={a.thisMonth} currency={a.currency} display={display} />}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>
-                      <Amount value={a.lastMonth} currency={a.currency} display={display} />
+                      {a.free && a.lastMonth !== null ? "Free" : <Amount value={a.lastMonth} currency={a.currency} display={display} />}
                     </td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{when(a.lastRun)}</td>
                   </tr>
@@ -337,6 +350,21 @@ export default function CloudAccountsPage() {
             </tbody>
           </table>
         </div>
+
+        {savedFixedError && (
+          <div role="alert" className="mt-4 rounded-md px-4 py-3 text-sm" style={{ background: "#FEF3C7", color: "#92400E" }} data-testid="fixed-costs-unavailable">
+            Fixed costs saved from this page are not shown and cannot be edited right now: {savedFixedError}
+          </div>
+        )}
+        {savedFixed !== null && (
+          <FixedCostsEditor
+            items={savedFixed}
+            onSave={async (items) => {
+              await saveFixedCosts(items);
+              await load();
+            }}
+          />
+        )}
 
         <p className="mt-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>
           {fixedCount > 0 ? "A fixed cost is a monthly amount entered in configuration, counted in full for each month it applies to. " : ""}

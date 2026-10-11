@@ -36,9 +36,18 @@ import client from "./api-client";
  *   { "_fixed": [ { "name": "Team chat", "provider": "Example", "amount": 20,
  *                   "currency": "USD", "from": "2026-01", "to": "2026-12" } ] }
  * amount is PER MONTH. from and to are optional months (YYYY-MM, both
- * inclusive). Each entry is listed like an account and added to the total.
+ * inclusive). "plan": "free" marks a plan that costs nothing: it is listed
+ * as "Free" and its amount is taken as 0. Each entry is listed like an account and added to the total.
  * 🔑 These exist on this page only: the cost engine never sees them, so they
  * are in none of its reports and none of its API answers.
+ *
+ * Fixed costs can also be added and changed FROM THE PAGE when the deployment
+ * gives the interface somewhere to keep them (FIXED_COSTS_DIR, see
+ * docker-entrypoint.sh). They are then one file, store/fixed-costs.json, which
+ * nginx serves and accepts back with PUT:
+ *   { "fixed": [ ...same entries as above... ] }
+ * Entries from configuration and entries saved from the page are both shown;
+ * only the saved ones can be edited here.
  */
 
 export const DEFAULT_CURRENCY = "USD";
@@ -63,6 +72,8 @@ export interface CloudAccount {
   /** Month to date. null = no data for this account in that window (NOT zero). */
   thisMonth: number | null;
   lastMonth: number | null;
+  /** A fixed cost marked as a free plan: listed, shown as "Free", adds nothing. */
+  free: boolean;
 }
 
 interface StatusRow {
@@ -135,10 +146,12 @@ interface AccountLabel {
 
 const FIXED_KEY = "_fixed";
 
-interface FixedCost {
+export interface FixedCost {
   name: string;
   provider: string;
-  /** Per month, in `currency`. */
+  /** "free" = a plan that costs nothing, listed so it is not forgotten. */
+  plan: "paid" | "free";
+  /** Per month, in `currency`. Always 0 for a free plan. */
   amount: number;
   currency: string;
   /** First and last month it is charged, YYYY-MM, inclusive. null = open. */
@@ -157,14 +170,16 @@ function fixedCosts(raw: unknown): FixedCost[] {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const o = item as Record<string, unknown>;
     const name = typeof o.name === "string" ? o.name.trim() : "";
-    const amount = o.amount;
+    const plan = o.plan === "free" ? "free" : "paid";
+    // A free plan costs nothing whatever amount came with it.
+    const amount = plan === "free" ? 0 : o.amount;
     const currency = typeof o.currency === "string" ? o.currency.trim().toUpperCase() : DEFAULT_CURRENCY;
     const from = month(o.from);
     const to = month(o.to);
     if (!name || typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) continue;
     if (!/^[A-Z]{3}$/.test(currency) || from === undefined || to === undefined) continue;
     const provider = typeof o.provider === "string" && o.provider.trim() ? o.provider.trim() : "Subscription";
-    out.push({ name, provider, amount, currency, from, to });
+    out.push({ name, provider, plan, amount, currency, from, to });
   }
   return out;
 }
@@ -232,16 +247,46 @@ export function convert(amount: number, from: string, to: string, perUsd: Record
   return (amount / f) * t;
 }
 
-async function displayCurrency(): Promise<string | null> {
+async function displayConfig(): Promise<{ currency: string | null; fixedEditable: boolean }> {
   try {
     const resp = await fetch(`${import.meta.env.BASE_URL}cloud-display.json`, { cache: "no-store" });
-    if (!resp.ok) return null;
+    if (!resp.ok) return { currency: null, fixedEditable: false };
     const data = await resp.json();
     const c = typeof data?.currency === "string" ? data.currency.trim().toUpperCase() : "";
-    return /^[A-Z]{3}$/.test(c) ? c : null;
+    return { currency: /^[A-Z]{3}$/.test(c) ? c : null, fixedEditable: data?.fixedCostsEditable === true };
   } catch {
-    return null;
+    return { currency: null, fixedEditable: false };
   }
+}
+
+const STORE_URL = `${import.meta.env.BASE_URL}store/fixed-costs.json`;
+
+/**
+ * The fixed costs saved from the page. Throws when the file cannot be read or
+ * is not what this page wrote: the caller must then NOT offer editing, because
+ * saving would replace whatever is there with an empty list.
+ */
+async function savedFixedCosts(): Promise<FixedCost[]> {
+  const resp = await fetch(STORE_URL, { cache: "no-store" });
+  if (!resp.ok) throw new Error(`the saved fixed costs answered ${resp.status}`);
+  const data = await resp.json();
+  if (!data || typeof data !== "object" || !Array.isArray((data as { fixed?: unknown }).fixed)) {
+    throw new Error("the saved fixed costs are not in the expected shape");
+  }
+  return fixedCosts((data as { fixed: unknown }).fixed);
+}
+
+/** Replace the saved list. The whole list is written each time. */
+export async function saveFixedCosts(items: FixedCost[]): Promise<void> {
+  // Through the same check as reading: nothing is stored that would not be shown.
+  const clean = fixedCosts(items);
+  if (clean.length !== items.length) throw new Error("one of the entries is not valid, nothing was saved");
+  const resp = await fetch(STORE_URL, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fixed: clean }),
+  });
+  if (!resp.ok) throw new Error(`saving answered ${resp.status}`);
 }
 
 async function ratesPerUsd(): Promise<{ date: string; perUsd: Record<string, number> }> {
@@ -270,16 +315,31 @@ export interface CloudAccountsResult {
   display: DisplayRates | null;
   /** Set when a display currency IS configured but conversion is not possible. */
   displayError: string | null;
+  /** The fixed costs saved from the page. null = editing is not available here. */
+  savedFixed: FixedCost[] | null;
+  /** Set when editing is switched on but the saved list could not be read. */
+  savedFixedError: string | null;
 }
 
 export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
-  const [statusResp, config, month, lastMonth, displayCode] = await Promise.all([
+  const [statusResp, config, month, lastMonth, displayCfg] = await Promise.all([
     client.get("/cloudCost/status"),
     accountConfig(),
     totals("month").catch((e) => e as Error),
     totals("lastmonth").catch((e) => e as Error),
-    displayCurrency(),
+    displayConfig(),
   ]);
+  const displayCode = displayCfg.currency;
+
+  let savedFixed: FixedCost[] | null = null;
+  let savedFixedError: string | null = null;
+  if (displayCfg.fixedEditable) {
+    try {
+      savedFixed = await savedFixedCosts();
+    } catch (e) {
+      savedFixedError = e instanceof Error ? e.message : "the saved fixed costs could not be read";
+    }
+  }
 
   // Rates are only fetched when a display currency is asked for. A failure
   // here must never hide the accounts: the page falls back to own currencies.
@@ -320,6 +380,7 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
       nextRun: s.nextRun ?? null,
       thisMonth: null,
       lastMonth: null,
+      free: false,
     });
   }
 
@@ -331,7 +392,7 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
         acct = {
           id, name: names[id]?.name ?? id, currency: names[id]?.currency ?? DEFAULT_CURRENCY,
           provider: "Cloud", projectId: null, state: "ok",
-          statusText: "Has cost data", lastRun: null, nextRun: null, thisMonth: null, lastMonth: null,
+          statusText: "Has cost data", lastRun: null, nextRun: null, thisMonth: null, lastMonth: null, free: false,
         };
         byId.set(id, acct);
       }
@@ -342,18 +403,22 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
   // 3. Fixed costs. Listed only for a month they are charged in; one that has
   // ended, or not started, is in neither month and is left out.
   const [thisKey, lastKey] = [monthKey(0), monthKey(1)];
-  config.fixed.forEach((f, i) => {
-    const thisMonth = chargedIn(f, thisKey) ? f.amount : null;
-    const lastMonth = chargedIn(f, lastKey) ? f.amount : null;
-    if (thisMonth === null && lastMonth === null) return;
-    byId.set(`${FIXED_KEY}:${i}`, {
-      id: `fixed-${i + 1}`, name: f.name, currency: f.currency, provider: f.provider, projectId: null,
-      state: "fixed", statusText: "Fixed monthly cost", lastRun: null, nextRun: null, thisMonth, lastMonth,
+  const addFixed = (list: FixedCost[], kind: string) =>
+    list.forEach((f, i) => {
+      const thisMonth = chargedIn(f, thisKey) ? f.amount : null;
+      const lastMonth = chargedIn(f, lastKey) ? f.amount : null;
+      if (thisMonth === null && lastMonth === null) return;
+      byId.set(`${FIXED_KEY}:${kind}:${i}`, {
+        id: `${kind}-${i + 1}`, name: f.name, currency: f.currency, provider: f.provider, projectId: null,
+        state: "fixed", statusText: f.plan === "free" ? "Free plan" : "Fixed monthly cost",
+        lastRun: null, nextRun: null, thisMonth, lastMonth, free: f.plan === "free",
+      });
     });
-  });
+  addFixed(config.fixed, "fixed");
+  addFixed(savedFixed ?? [], "saved");
 
   const accounts = [...byId.values()].sort(
     (a, b) => (b.thisMonth ?? -1) - (a.thisMonth ?? -1) || a.name.localeCompare(b.name),
   );
-  return { accounts, totalsError, display, displayError };
+  return { accounts, totalsError, display, displayError, savedFixed, savedFixedError };
 }

@@ -29,11 +29,22 @@ import client from "./api-client";
  * from a public reference-rate service and caches; the browser never calls a
  * third party. A converted figure is an approximation: the provider's invoice
  * uses the provider's own rate on its own date.
+ *
+ * Fixed costs (optional). A subscription with no billing API cannot be fetched,
+ * so it is written down instead, under the reserved key "_fixed" in
+ * cloud-accounts.json:
+ *   { "_fixed": [ { "name": "Team chat", "provider": "Example", "amount": 20,
+ *                   "currency": "USD", "from": "2026-01", "to": "2026-12" } ] }
+ * amount is PER MONTH. from and to are optional months (YYYY-MM, both
+ * inclusive). Each entry is listed like an account and added to the total.
+ * 🔑 These exist on this page only: the cost engine never sees them, so they
+ * are in none of its reports and none of its API answers.
  */
 
 export const DEFAULT_CURRENCY = "USD";
 
-export type AccountState = "ok" | "waiting" | "failed" | "unknown";
+// "fixed" = not a connection at all: an amount written in configuration.
+export type AccountState = "ok" | "waiting" | "failed" | "unknown" | "fixed";
 
 export interface CloudAccount {
   /** Billing account ID as the cloud provider writes it, e.g. 012345-6789AB-CDEF01 */
@@ -122,16 +133,63 @@ interface AccountLabel {
   currency?: string;
 }
 
-async function accountLabels(): Promise<Record<string, AccountLabel>> {
+const FIXED_KEY = "_fixed";
+
+interface FixedCost {
+  name: string;
+  provider: string;
+  /** Per month, in `currency`. */
+  amount: number;
+  currency: string;
+  /** First and last month it is charged, YYYY-MM, inclusive. null = open. */
+  from: string | null;
+  to: string | null;
+}
+
+// An entry that is not fully understood is left out. A wrong amount in a total
+// is worse than a missing row, which is at least visible.
+function fixedCosts(raw: unknown): FixedCost[] {
+  if (!Array.isArray(raw)) return [];
+  const month = (v: unknown): string | null | undefined =>
+    v === undefined || v === null || v === "" ? null : typeof v === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(v) ? v : undefined;
+  const out: FixedCost[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const name = typeof o.name === "string" ? o.name.trim() : "";
+    const amount = o.amount;
+    const currency = typeof o.currency === "string" ? o.currency.trim().toUpperCase() : DEFAULT_CURRENCY;
+    const from = month(o.from);
+    const to = month(o.to);
+    if (!name || typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) continue;
+    if (!/^[A-Z]{3}$/.test(currency) || from === undefined || to === undefined) continue;
+    const provider = typeof o.provider === "string" && o.provider.trim() ? o.provider.trim() : "Subscription";
+    out.push({ name, provider, amount, currency, from, to });
+  }
+  return out;
+}
+
+/** YYYY-MM of the month `back` months before now, in UTC like the cost windows. */
+function monthKey(back: number): string {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1)).toISOString().slice(0, 7);
+}
+
+function chargedIn(f: FixedCost, month: string): boolean {
+  return (f.from === null || f.from <= month) && (f.to === null || month <= f.to);
+}
+
+async function accountConfig(): Promise<{ labels: Record<string, AccountLabel>; fixed: FixedCost[] }> {
   try {
     // Served by nginx next to the app, NOT through the API proxy. no-store, so
     // a renamed account shows without a hard refresh.
     const resp = await fetch(`${import.meta.env.BASE_URL}cloud-accounts.json`, { cache: "no-store" });
-    if (!resp.ok) return {};
+    if (!resp.ok) return { labels: {}, fixed: [] };
     const data = await resp.json();
-    if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+    if (!data || typeof data !== "object" || Array.isArray(data)) return { labels: {}, fixed: [] };
     const labels: Record<string, AccountLabel> = {};
     for (const [k, v] of Object.entries(data)) {
+      if (k === FIXED_KEY) continue;
       if (typeof v === "string" && v.trim()) {
         labels[k.toUpperCase()] = { name: v.trim() };
       } else if (v && typeof v === "object" && !Array.isArray(v)) {
@@ -145,9 +203,9 @@ async function accountLabels(): Promise<Record<string, AccountLabel>> {
         if (name || currency) labels[k.toUpperCase()] = { name, currency };
       }
     }
-    return labels;
+    return { labels, fixed: fixedCosts((data as Record<string, unknown>)[FIXED_KEY]) };
   } catch {
-    return {};
+    return { labels: {}, fixed: [] };
   }
 }
 
@@ -215,9 +273,9 @@ export interface CloudAccountsResult {
 }
 
 export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
-  const [statusResp, names, month, lastMonth, displayCode] = await Promise.all([
+  const [statusResp, config, month, lastMonth, displayCode] = await Promise.all([
     client.get("/cloudCost/status"),
-    accountLabels(),
+    accountConfig(),
     totals("month").catch((e) => e as Error),
     totals("lastmonth").catch((e) => e as Error),
     displayCurrency(),
@@ -237,6 +295,7 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
     }
   }
 
+  const names = config.labels;
   const monthMap = month instanceof Map ? month : new Map<string, number>();
   const lastMap = lastMonth instanceof Map ? lastMonth : new Map<string, number>();
   const totalsError =
@@ -279,6 +338,19 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
       acct[field] = cost;
     }
   }
+
+  // 3. Fixed costs. Listed only for a month they are charged in; one that has
+  // ended, or not started, is in neither month and is left out.
+  const [thisKey, lastKey] = [monthKey(0), monthKey(1)];
+  config.fixed.forEach((f, i) => {
+    const thisMonth = chargedIn(f, thisKey) ? f.amount : null;
+    const lastMonth = chargedIn(f, lastKey) ? f.amount : null;
+    if (thisMonth === null && lastMonth === null) return;
+    byId.set(`${FIXED_KEY}:${i}`, {
+      id: `fixed-${i + 1}`, name: f.name, currency: f.currency, provider: f.provider, projectId: null,
+      state: "fixed", statusText: "Fixed monthly cost", lastRun: null, nextRun: null, thisMonth, lastMonth,
+    });
+  });
 
   const accounts = [...byId.values()].sort(
     (a, b) => (b.thisMonth ?? -1) - (a.thisMonth ?? -1) || a.name.localeCompare(b.name),

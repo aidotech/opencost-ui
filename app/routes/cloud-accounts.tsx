@@ -21,6 +21,8 @@ const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string 
   waiting: { label: "Waiting for data", bg: "#FEF3C7", fg: "#92400E" },
   failed: { label: "Connection failed", bg: "#FEE2E2", fg: "#991B1B" },
   unknown: { label: "Unknown", bg: "#E5E7EB", fg: "#374151" },
+  // Not fetched from anywhere: an amount written in configuration.
+  fixed: { label: "Fixed cost", bg: "#E0E7FF", fg: "#3730A3" },
 };
 
 // Each account's amounts are in that account's own billing currency.
@@ -154,6 +156,11 @@ export default function CloudAccountsPage() {
       }).filter(Boolean)
     : [];
   const waiting = (accounts ?? []).filter((a) => a.state === "waiting").length;
+  // Fixed costs are in the list and the total, but they are not connections.
+  const fixedCount = (accounts ?? []).filter((a) => a.state === "fixed").length;
+  const connected = (accounts?.length ?? 0) - fixedCount;
+  // One that applied last month only is listed, but is not in this month's total.
+  const fixedInTotal = withData.filter((a) => a.state === "fixed").length;
   // Largest first, compared in the display currency when there is one, so a
   // dollar account is not ranked below a rupee account with a bigger number.
   const rank = (a: CloudAccount): number => {
@@ -247,7 +254,8 @@ export default function CloudAccountsPage() {
                     ))}
             </div>
             <div className="mt-1 text-xs opacity-90">
-              {withData.length} of {accounts?.length ?? 0} accounts reporting
+              {withData.length - fixedInTotal} of {connected} accounts reporting
+              {fixedInTotal > 0 ? ` · ${fixedInTotal} fixed ${fixedInTotal === 1 ? "cost" : "costs"} included` : ""}
             </div>
             {rateLines.length > 0 && (
               <div className="mt-1 text-xs opacity-90" data-testid="cloud-accounts-rate">
@@ -258,7 +266,12 @@ export default function CloudAccountsPage() {
           </div>
           <div className="rounded-xl border p-4" style={{ borderColor: "var(--cds-border-subtle)", background: "var(--cds-layer-01)" }}>
             <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--cds-text-secondary)" }}>Accounts connected</div>
-            <div className="mt-1 text-3xl font-bold" style={{ color: "var(--cds-text-primary)" }}>{accounts?.length ?? "…"}</div>
+            <div className="mt-1 text-3xl font-bold" style={{ color: "var(--cds-text-primary)" }}>{accounts === null ? "…" : connected}</div>
+            {fixedCount > 0 && (
+              <div className="mt-1 text-xs" style={{ color: "var(--cds-text-secondary)" }} data-testid="cloud-accounts-fixed-count">
+                plus {fixedCount} fixed {fixedCount === 1 ? "cost" : "costs"}
+              </div>
+            )}
           </div>
           <div className="rounded-xl border p-4" style={{ borderColor: "var(--cds-border-subtle)", background: "var(--cds-layer-01)" }}>
             <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: "var(--cds-text-secondary)" }}>Waiting for first data</div>
@@ -293,7 +306,9 @@ export default function CloudAccountsPage() {
                     <td className="px-4 py-3">
                       <div className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{a.name}</div>
                       <div className="text-xs" style={{ color: "var(--cds-text-secondary)" }}>
-                        {a.provider}{a.projectId ? ` · ${a.projectId}` : ""} · {a.id}
+                        {a.state === "fixed"
+                          ? `${a.provider} · fixed monthly amount, not fetched`
+                          : `${a.provider}${a.projectId ? ` · ${a.projectId}` : ""} · ${a.id}`}
                       </div>
                     </td>
                     <td className="px-4 py-3">
@@ -324,6 +339,7 @@ export default function CloudAccountsPage() {
         </div>
 
         <p className="mt-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>
+          {fixedCount > 0 ? "A fixed cost is a monthly amount entered in configuration, counted in full for each month it applies to. " : ""}
           A dash means no data for that period, not a zero. A newly connected account only has costs
           from the day its billing export was switched on.
           {display && convertedFrom.size > 0

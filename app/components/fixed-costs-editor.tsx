@@ -14,30 +14,35 @@ const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED"];
 interface Draft {
   name: string;
   provider: string;
+  plan: "paid" | "free";
   amount: string;
   currency: string;
   from: string;
   to: string;
 }
 
-const EMPTY: Draft = { name: "", provider: "", amount: "", currency: "USD", from: "", to: "" };
+const EMPTY: Draft = { name: "", provider: "", plan: "paid", amount: "", currency: "USD", from: "", to: "" };
 
 function toDraft(f: FixedCost): Draft {
-  return { name: f.name, provider: f.provider, amount: String(f.amount), currency: f.currency, from: f.from ?? "", to: f.to ?? "" };
+  return { name: f.name, provider: f.provider, plan: f.plan, amount: f.plan === "free" ? "" : String(f.amount), currency: f.currency, from: f.from ?? "", to: f.to ?? "" };
 }
 
 // Returns the entry, or the reason it cannot be saved.
 function fromDraft(d: Draft): FixedCost | string {
   const name = d.name.trim();
   if (!name) return "Give it a name.";
-  // An empty amount is refused rather than read as 0: a free plan is typed as 0.
-  if (d.amount.trim() === "") return "Enter the monthly amount. Use 0 for a free plan.";
-  const amount = Number(d.amount);
-  if (!Number.isFinite(amount) || amount < 0) return "The amount must be a number, 0 or more.";
+  let amount = 0;
+  if (d.plan === "paid") {
+    // An empty amount is refused rather than read as 0.
+    if (d.amount.trim() === "") return "Enter the monthly amount, or choose Free.";
+    amount = Number(d.amount);
+    if (!Number.isFinite(amount) || amount < 0) return "The amount must be a number, 0 or more.";
+  }
   if (d.from && d.to && d.from > d.to) return "The last month is before the first month.";
   return {
     name,
     provider: d.provider.trim() || "Subscription",
+    plan: d.plan,
     amount,
     currency: d.currency,
     from: d.from || null,
@@ -146,7 +151,7 @@ export default function FixedCostsEditor({
               <div className="text-sm">
                 <span className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{f.name}</span>
                 <span style={{ color: "var(--cds-text-secondary)" }}>
-                  {" "}· {f.provider} · {f.amount} {f.currency} a month
+                  {" "}· {f.provider} · {f.plan === "free" ? "Free plan" : `${f.amount} ${f.currency} a month`}
                   {f.from ? ` · from ${f.from}` : ""}
                   {f.to ? ` · until ${f.to}` : ""}
                 </span>
@@ -196,13 +201,21 @@ export default function FixedCostsEditor({
             <label className={label} htmlFor="fc-provider" style={{ color: "var(--cds-text-secondary)" }}>Provider (optional)</label>
             <input id="fc-provider" className={field} style={fieldStyle} value={draft.provider} onChange={set("provider")} maxLength={40} />
           </div>
+          <div className="col-span-2">
+            <label className={label} htmlFor="fc-plan" style={{ color: "var(--cds-text-secondary)" }}>Plan</label>
+            <select id="fc-plan" className={field} style={fieldStyle} value={draft.plan} onChange={set("plan")}>
+              <option value="paid">Paid</option>
+              <option value="free">Free</option>
+            </select>
+          </div>
+          {/* A free plan has no amount: the two fields are switched off, not hidden, so the form does not jump. */}
           <div>
             <label className={label} htmlFor="fc-amount" style={{ color: "var(--cds-text-secondary)" }}>Per month</label>
-            <input id="fc-amount" className={field} style={fieldStyle} value={draft.amount} onChange={set("amount")} inputMode="decimal" />
+            <input id="fc-amount" className={`${field} disabled:opacity-50`} style={fieldStyle} value={draft.plan === "free" ? "" : draft.amount} onChange={set("amount")} inputMode="decimal" disabled={draft.plan === "free"} placeholder={draft.plan === "free" ? "Free" : ""} />
           </div>
           <div>
             <label className={label} htmlFor="fc-currency" style={{ color: "var(--cds-text-secondary)" }}>Currency</label>
-            <select id="fc-currency" className={field} style={fieldStyle} value={draft.currency} onChange={set("currency")}>
+            <select id="fc-currency" className={`${field} disabled:opacity-50`} style={fieldStyle} value={draft.currency} onChange={set("currency")} disabled={draft.plan === "free"}>
               {currencies.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>

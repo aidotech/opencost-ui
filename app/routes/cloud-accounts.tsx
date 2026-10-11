@@ -28,6 +28,9 @@ const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string 
   fixed: { label: "Fixed cost", bg: "#E0E7FF", fg: "#3730A3" },
 };
 
+// A fixed cost marked as a free plan: listed, costs nothing.
+const FREE_STYLE = { label: "Free plan", bg: "#DCFCE7", fg: "#166534" };
+
 // Each account's amounts are in that account's own billing currency.
 // "—" means no data, which is different from a real total of 0.00.
 function money(v: number | null, currency: string): string {
@@ -141,6 +144,8 @@ export default function CloudAccountsPage() {
   const totals = new Map<string, number>();
   const convertedFrom = new Set<string>();
   for (const a of withData) {
+    // A free plan adds nothing, and must not open a 0.00 line in its currency.
+    if (a.free) continue;
     const v = a.thisMonth ?? 0;
     const c = display ? convert(v, a.currency, display.currency, display.perUsd) : null;
     if (display && c !== null) {
@@ -308,14 +313,14 @@ export default function CloudAccountsPage() {
                 </td></tr>
               )}
               {rows.map((a) => {
-                const st = STATE_STYLE[a.state];
+                const st = a.free ? FREE_STYLE : STATE_STYLE[a.state];
                 return (
                   <tr key={a.id} data-testid="cloud-account-row" style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
                     <td className="px-4 py-3">
                       <div className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{a.name}</div>
                       <div className="text-xs" style={{ color: "var(--cds-text-secondary)" }}>
                         {a.state === "fixed"
-                          ? `${a.provider} · fixed monthly amount, not fetched`
+                          ? `${a.provider} · ${a.free ? "free plan" : "fixed monthly amount"}, not fetched`
                           : `${a.provider}${a.projectId ? ` · ${a.projectId}` : ""} · ${a.id}`}
                       </div>
                     </td>
@@ -333,10 +338,10 @@ export default function CloudAccountsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-right font-semibold tabular-nums" style={{ color: "var(--cds-text-primary)" }}>
-                      <Amount value={a.thisMonth} currency={a.currency} display={display} />
+                      {a.free && a.thisMonth !== null ? "Free" : <Amount value={a.thisMonth} currency={a.currency} display={display} />}
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums" style={{ color: "var(--cds-text-secondary)" }}>
-                      <Amount value={a.lastMonth} currency={a.currency} display={display} />
+                      {a.free && a.lastMonth !== null ? "Free" : <Amount value={a.lastMonth} currency={a.currency} display={display} />}
                     </td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{when(a.lastRun)}</td>
                   </tr>

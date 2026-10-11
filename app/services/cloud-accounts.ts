@@ -36,7 +36,8 @@ import client from "./api-client";
  *   { "_fixed": [ { "name": "Team chat", "provider": "Example", "amount": 20,
  *                   "currency": "USD", "from": "2026-01", "to": "2026-12" } ] }
  * amount is PER MONTH. from and to are optional months (YYYY-MM, both
- * inclusive). Each entry is listed like an account and added to the total.
+ * inclusive). "plan": "free" marks a plan that costs nothing: it is listed
+ * as "Free" and its amount is taken as 0. Each entry is listed like an account and added to the total.
  * 🔑 These exist on this page only: the cost engine never sees them, so they
  * are in none of its reports and none of its API answers.
  *
@@ -71,6 +72,8 @@ export interface CloudAccount {
   /** Month to date. null = no data for this account in that window (NOT zero). */
   thisMonth: number | null;
   lastMonth: number | null;
+  /** A fixed cost marked as a free plan: listed, shown as "Free", adds nothing. */
+  free: boolean;
 }
 
 interface StatusRow {
@@ -146,7 +149,9 @@ const FIXED_KEY = "_fixed";
 export interface FixedCost {
   name: string;
   provider: string;
-  /** Per month, in `currency`. */
+  /** "free" = a plan that costs nothing, listed so it is not forgotten. */
+  plan: "paid" | "free";
+  /** Per month, in `currency`. Always 0 for a free plan. */
   amount: number;
   currency: string;
   /** First and last month it is charged, YYYY-MM, inclusive. null = open. */
@@ -165,14 +170,16 @@ function fixedCosts(raw: unknown): FixedCost[] {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const o = item as Record<string, unknown>;
     const name = typeof o.name === "string" ? o.name.trim() : "";
-    const amount = o.amount;
+    const plan = o.plan === "free" ? "free" : "paid";
+    // A free plan costs nothing whatever amount came with it.
+    const amount = plan === "free" ? 0 : o.amount;
     const currency = typeof o.currency === "string" ? o.currency.trim().toUpperCase() : DEFAULT_CURRENCY;
     const from = month(o.from);
     const to = month(o.to);
     if (!name || typeof amount !== "number" || !Number.isFinite(amount) || amount < 0) continue;
     if (!/^[A-Z]{3}$/.test(currency) || from === undefined || to === undefined) continue;
     const provider = typeof o.provider === "string" && o.provider.trim() ? o.provider.trim() : "Subscription";
-    out.push({ name, provider, amount, currency, from, to });
+    out.push({ name, provider, plan, amount, currency, from, to });
   }
   return out;
 }
@@ -373,6 +380,7 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
       nextRun: s.nextRun ?? null,
       thisMonth: null,
       lastMonth: null,
+      free: false,
     });
   }
 
@@ -384,7 +392,7 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
         acct = {
           id, name: names[id]?.name ?? id, currency: names[id]?.currency ?? DEFAULT_CURRENCY,
           provider: "Cloud", projectId: null, state: "ok",
-          statusText: "Has cost data", lastRun: null, nextRun: null, thisMonth: null, lastMonth: null,
+          statusText: "Has cost data", lastRun: null, nextRun: null, thisMonth: null, lastMonth: null, free: false,
         };
         byId.set(id, acct);
       }
@@ -402,7 +410,8 @@ export async function fetchCloudAccounts(): Promise<CloudAccountsResult> {
       if (thisMonth === null && lastMonth === null) return;
       byId.set(`${FIXED_KEY}:${kind}:${i}`, {
         id: `${kind}-${i + 1}`, name: f.name, currency: f.currency, provider: f.provider, projectId: null,
-        state: "fixed", statusText: "Fixed monthly cost", lastRun: null, nextRun: null, thisMonth, lastMonth,
+        state: "fixed", statusText: f.plan === "free" ? "Free plan" : "Fixed monthly cost",
+        lastRun: null, nextRun: null, thisMonth, lastMonth, free: f.plan === "free",
       });
     });
   addFixed(config.fixed, "fixed");

@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import CloudAccountBreakdown from "~/components/cloud-account-breakdown";
+import { Amount, money } from "~/components/cloud-amount";
 import DashboardAppShell from "~/components/dashboard-app-shell";
 import FixedCostsEditor from "~/components/fixed-costs-editor";
 import {
@@ -14,9 +16,9 @@ import {
 /**
  * Cloud Accounts: one row per cloud billing account, one total each.
  *
- * Deliberately not a breakdown. For several small accounts (mostly Firebase),
- * the useful question is "what did each account cost this month", and the
- * answer is one number.
+ * The list itself is one number per account: for several small accounts
+ * (mostly Firebase), the first question is "what did each account cost this
+ * month". An account with data opens to show what it spent that on. (OP-16)
  */
 
 const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string }> = {
@@ -30,35 +32,6 @@ const STATE_STYLE: Record<AccountState, { label: string; bg: string; fg: string 
 
 // A fixed cost marked as a free plan: listed, costs nothing.
 const FREE_STYLE = { label: "Free plan", bg: "#DCFCE7", fg: "#166534" };
-
-// Each account's amounts are in that account's own billing currency.
-// "—" means no data, which is different from a real total of 0.00.
-function money(v: number | null, currency: string): string {
-  if (v === null) return "—";
-  try {
-    return v.toLocaleString("en-US", { style: "currency", currency, minimumFractionDigits: 2 });
-  } catch {
-    // An unknown currency code must not break the page.
-    return `${v.toFixed(2)} ${currency}`;
-  }
-}
-
-// One amount cell. With a display currency, the converted figure leads and the
-// amount the provider actually charged stays visible under it. An account whose
-// currency has no rate is shown in its own currency only, never guessed.
-function Amount({ value, currency, display }: { value: number | null; currency: string; display: DisplayRates | null }) {
-  if (value === null || !display || currency === display.currency) return <>{money(value, currency)}</>;
-  const converted = convert(value, currency, display.currency, display.perUsd);
-  if (converted === null) return <>{money(value, currency)}</>;
-  return (
-    <>
-      <div>{money(converted, display.currency)}</div>
-      <div className="text-xs font-normal" style={{ color: "var(--cds-text-secondary)" }} data-testid="cloud-account-original">
-        {money(value, currency)}
-      </div>
-    </>
-  );
-}
 
 // The switch's third choice: no conversion, each account in its own currency.
 const ORIGINAL = "ORIGINAL";
@@ -85,6 +58,8 @@ export default function CloudAccountsPage() {
   const [savedFixed, setSavedFixed] = useState<FixedCost[] | null>(null);
   const [savedFixedError, setSavedFixedError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // The account whose breakdown is open. One at a time.
+  const [openId, setOpenId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -314,10 +289,30 @@ export default function CloudAccountsPage() {
               )}
               {rows.map((a) => {
                 const st = a.free ? FREE_STYLE : STATE_STYLE[a.state];
+                // Only an account the engine has costs for can be opened: a
+                // fixed cost is one written-down number with nothing inside it.
+                const canOpen = a.state !== "fixed" && (a.thisMonth !== null || a.lastMonth !== null);
+                const isOpen = canOpen && openId === a.id;
                 return (
-                  <tr key={a.id} data-testid="cloud-account-row" style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
+                  <Fragment key={a.id}>
+                  <tr data-testid="cloud-account-row" style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
                     <td className="px-4 py-3">
-                      <div className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{a.name}</div>
+                      {canOpen ? (
+                        <button
+                          type="button"
+                          aria-expanded={isOpen}
+                          onClick={() => setOpenId(isOpen ? null : a.id)}
+                          className="flex items-center gap-2 border-0 bg-transparent p-0 text-left font-semibold"
+                          style={{ color: "var(--cds-text-primary)" }}
+                          title="Show what this account spent on"
+                          data-testid="cloud-account-open"
+                        >
+                          <span aria-hidden="true" className="w-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{isOpen ? "▾" : "▸"}</span>
+                          <span className="underline decoration-dotted underline-offset-4">{a.name}</span>
+                        </button>
+                      ) : (
+                        <div className="font-semibold" style={{ color: "var(--cds-text-primary)" }}>{a.name}</div>
+                      )}
                       <div className="text-xs" style={{ color: "var(--cds-text-secondary)" }}>
                         {a.state === "fixed"
                           ? `${a.provider} · ${a.free ? "free plan" : "fixed monthly amount"}, not fetched`
@@ -345,6 +340,14 @@ export default function CloudAccountsPage() {
                     </td>
                     <td className="px-4 py-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>{when(a.lastRun)}</td>
                   </tr>
+                  {isOpen && (
+                    <tr style={{ borderBottom: "1px solid var(--cds-border-subtle)" }}>
+                      <td colSpan={5} className="p-0">
+                        <CloudAccountBreakdown accountId={a.id} accountName={a.name} currency={a.currency} display={display} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
             </tbody>
@@ -368,7 +371,7 @@ export default function CloudAccountsPage() {
 
         <p className="mt-3 text-xs" style={{ color: "var(--cds-text-secondary)" }}>
           {fixedCount > 0 ? "A fixed cost is a monthly amount entered in configuration, counted in full for each month it applies to. " : ""}
-          A dash means no data for that period, not a zero. A newly connected account only has costs
+          Select an account's name to see what it spent on. A dash means no data for that period, not a zero. A newly connected account only has costs
           from the day its billing export was switched on.
           {display && convertedFrom.size > 0
             ? ` Converted amounts use a daily reference rate and are approximate: the provider's invoice uses its own rate. The amount charged is shown under each converted figure.`

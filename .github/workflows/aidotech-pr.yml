@@ -1,0 +1,68 @@
+name: aidotech - pull request check
+
+# OUR workflow, not upstream's. (OP-17)
+#
+# The only check a pull request gets: the image builds and starts. It replaces
+# upstream's Build/Test, Lighthouse, Trivy, Scorecard and SBOM workflows, which
+# were removed from this fork. Nothing is pushed anywhere from here; the image
+# that ships is built by aidotech-deploy.yml after the merge.
+#
+# Same CodeBuild runner as the deploy (see the label note there). No ECR login
+# and no registry cache: a pull request must not need registry access.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aidotech-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build and start
+    # Only for branches of our own repository. A pull request from someone
+    # else's fork must not get to run its code on our runner.
+    if: github.repository == 'aidotech/opencost-ui' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: codebuild-opencost-ui-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The Dockerfile runs both interface builds (standard and legacy), so a
+      # change that does not compile fails here.
+      - name: Build
+        run: |
+          docker buildx build --platform linux/arm64 -t opencost-ui:pr --load .
+
+      # The container starts as it would in the cluster, the probe path
+      # answers, and the Cloud Accounts page is in the build. The fuller checks
+      # run in aidotech-deploy.yml before anything is pushed.
+      - name: Start the image
+        run: |
+          docker run -d --name pr -p 127.0.0.1:9090:9090 \
+            -e API_SERVER=127.0.0.1 -e API_PORT=9003 -e UI_PORT=9090 \
+            opencost-ui:pr
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9090/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { echo "::error::/healthz never answered"; docker logs pr; exit 1; }
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9090/cloud-accounts)" = "200" ] \
+            || { echo "::error::/cloud-accounts did not answer 200"; exit 1; }
+          # Any path answers 200 in a single-page app, so look for the page in
+          # the files. (The image's grep is BusyBox: no --include.)
+          docker exec pr sh -c 'grep -rlq "cloud-accounts" /var/www' \
+            || { echo "::error::the Cloud Accounts page is not in the build"; exit 1; }

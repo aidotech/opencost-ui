@@ -42,9 +42,17 @@ jobs:
 
       # The Dockerfile runs both interface builds (standard and legacy), so a
       # change that does not compile fails here.
+      #
+      # The two base images are taken from AWS's public mirror of Docker Hub's
+      # official images, by name override, so the Dockerfile stays as upstream
+      # wrote it. Docker Hub rate-limits the runners' shared addresses (429),
+      # and there is no registry cache here to fall back on.
       - name: Build
         run: |
-          docker buildx build --platform linux/arm64 -t opencost-ui:pr --load .
+          docker buildx build --platform linux/arm64 \
+            --build-context node:20-alpine=docker-image://public.ecr.aws/docker/library/node:20-alpine \
+            --build-context nginx:alpine=docker-image://public.ecr.aws/docker/library/nginx:alpine \
+            -t opencost-ui:pr --load .
 
       # The container starts as it would in the cluster, the probe path
       # answers, and the Cloud Accounts page is in the build. The fuller checks

@@ -13,6 +13,11 @@ import client from "./api-client";
  * 🔑 Amounts are net cost (what was charged, after credits), in the account's
  * own billing currency, like the account totals. The services of an account
  * add up to its total for the same window.
+ *
+ * Tax. The engine reads usage lines only. Where the deployment feeds it the
+ * bill's tax as a service named "Tax" (AWS, OP-18), tax is one more row here
+ * and is in the account's total. A month's tax is exact; within the month it
+ * is spread over the days in proportion to each day's usage.
  */
 
 export const BREAKDOWN_WINDOWS = [
@@ -153,6 +158,9 @@ const SERVICE_NAMES: Record<string, string> = {
   AmazonAthena: "Athena: queries",
   AWSGlue: "Glue",
   AWSSystemsManager: "Systems Manager",
+  // Not a service on the bill: the engine is fed the bill's tax lines under
+  // this name (k8_opencost points it at a view that adds them). (OP-18)
+  Tax: "Tax on the bill",
 };
 
 export function serviceLabel(name: string): string | null {
